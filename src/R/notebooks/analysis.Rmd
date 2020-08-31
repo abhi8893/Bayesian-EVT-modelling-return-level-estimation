@@ -1,0 +1,398 @@
+---
+title: "Delhi return levels"
+output: 
+  html_notebook:
+    theme: cerulean
+    toc: yes
+    toc_float: yes
+---
+## Extract time series
+First step is to extract yearly maxima and daily time series for a single location using IMD gridded precipitation data for the years 1901-2017. <br />
+```{r}
+library(ncdf4)
+library(extRemes)
+
+f <- "/home/abhi/Documents/data/OBSERVATION/IMD/precip/1901-2017_ll25.nc"
+
+# Delhi
+p.lon <- 77.10
+p.lat <- 28.70
+
+## Yearly maximum time series
+system(paste("cdo -yearmax -remapnn,lon=",p.lon,"_lat=",p.lat, " ", f, " /tmp/point_ymax.nc", sep=""))
+
+## Daily time series
+system(paste("cdo -remapnn,lon=",p.lon,"_lat=",p.lat, " ", f, " /tmp/point.nc", sep=""))
+
+## Read netcdf files
+nc.p.ymax <- nc_open("/tmp/point_ymax.nc")
+nc.station <- nc_open("/tmp/point.nc")
+
+## Get the rainfall variable
+rf.p.ymax <- ncvar_get(nc.p.ymax, "rf")
+rf.p <- ncvar_get(nc.station, "rf")
+
+```
+
+
+## 1. Block Maxima approach
+Delhi : Annual maxima Precipitation time series 1901-2017
+```{r}
+years <- 1901:2017
+plot(years, rf.p.ymax, type="l", ylab="Precipitation (mm/day)", xlab="Year", main="Delhi")
+```
+### Fit the block maxima to GEV distribution.
+The GEV df is given by, <br />
+$G(x) = exp[-\{1 + \xi(\dfrac{x - u}{\sigma})\}^{-1/\xi}]$, <br />
+which in the limit $\xi \longrightarrow 0$ results in the Gumbel distribution given by, <br />
+$G(x) = exp[-exp\{-(\dfrac{x-u}{\sigma})\}]$
+
+$Type \hspace{0.1cm} I$ **Gumbel**: $\xi = 0$ <br />
+$Type \hspace{0.1cm} II$ **Fretchet**: $\xi > 0$, Heavy tailed <br />
+$Type \hspace{0.1cm} III$ **Upper bounded Weibull**: $\xi < 0$, (reverse or reflected Weibull) <br />
+
+The estimated parameters $\mu$, $\sigma$ and $\xi$ are fitted using MLE.
+The standard error of the ML estimators along with the parameter covariance matrix is also shown.
+Finally AIC and BIC are information criteria to determine the goodness of model fit (lower the better). <br />
+Since $\xi > 0$, we have a $Type \hspace{0.1cm}II$ i.e. Fretchet distribution 
+
+```{r}
+fit <- fevd(rf.p.ymax, units = "mm/day")
+fit
+```
+### Plot the fit.
+1. qqplot
+2. qqplot2 with regression line (with 95% confidence interval), 1:1 line.
+3. Compare empirical density v/s GEV probability distribution
+4. Return level plot for different return periods. 
+```{r}
+plot(fit)
+```
+### Return level estimates
+Estimate return levels for different return periods. The confidence intervals are based on normal approximation of the return level estimator.
+```{r}
+return.level(fit, return.period = c(2, 5, 10, 20, 50, 100), do.ci=TRUE)
+```
+Calculating return levels from a GEV distribution.<br />
+
+ We need to find the probability of exceeding certain precipitation amount *x* which exceeds every *m* years.
+This implies, that the probability of precipitation exceeding amount *x* is $1/m$. <br />
+
+$P(X > x) = 1 - P(X \le x)$,  ($X:$ Annual maximum precipitation)<br />
+For an *m* year return period, we have $P(X > x) = 1/m$, <br />
+Hence we have, $1/m = 1 - P(X \le x)$ <br />
+$\implies P(X \le x) = 1 - 1/m$, <br />
+We have estimated the *CDF* of $X$, by fitting the block maxima to a *GEV* distribution. <br />
+So, we have $X \sim GEV(x \hspace{0.1cm} |\hspace{0.1cm} \mu, \sigma, \xi)$ <br />
+So, from the *CDF* of X, we need to find $1 - 1/m$ quantile.
+
+```{r}
+# Make Fit object easier to manage 
+fit.distilled <- distill(fit)
+
+for (param in c("location", "scale", "shape")){
+  assign(param, fit.distilled[param])
+}
+
+# get 1 - 1/m quantile from the cdf
+## Calculate 2, 5, 10, 20, 50, 100 year return levels
+rperiods <- c(2, 5, 10, 20, 50, 100)
+rlevs <- c()
+for (m in rperiods){
+   rlevs<- c(rlevs, qevd(1 - 1/m, location, scale, shape, type = "GEV"))
+}
+names(rlevs) <- paste0(rperiods, "-year level")
+print(rlevs)
+```
+Which is the same as calculated by the package.
+```{r}
+rlevs <- as.vector(return.level(fit, return.period = rperiods))
+names(rlevs) <- paste0(rperiods, "-year level")
+print(rlevs)
+```
+
+### Parameter estimates
+The confidence intervals are based on normal approximation of the parameter estimators.
+```{r}
+ci(fit, type="parameter")
+```
+
+#### Demonstrate confidence interval for the shape parameter using normal approximation.
+The answer comes out to be same as calcuated by the package function ci.
+```{r}
+xi.mean <- distill(fit)["shape"]
+xi.sd <- sqrt(distill(fit)["shape.shape"])
+# 95% confidence interval
+qnorm(c(0.025, 0.975), xi.mean, xi.sd)
+```
+#### Profile likelihood
+1. Plot Log likelihood plots of the parameters and its gradient for each parameter. <br />
+**Note**: For each paramter this holds other parameters at their MLE. <br />
+This is important for deriving confidence intervals of the parameter estimates in the case when the log likelihood is not symmetrical about MLE.
+```{r}
+plot(fit, "trace")
+```
+2. Obtain ci based on profile likelihood method by specifying the range in which to look for the confidence interval
+
+First let's print out the normal approx. confidence interval for $\xi$ i.e. the shape parameter.
+```{r}
+ci(fit, type="parameter", which.par = 3, method="normal")
+```
+Now let's calculate it using profile likelihood method. <br />
+**NOTE**: Different ranges in which to look will produce slightly different confidence intervals. I don't know how to specify a good range to look for the confidence interval. This is usually determined by trial and error by looking at the profile likelihood plot.
+```{r}
+ci(fit, type="parameter", which.par = 3, xrange = c(-0.4, 0.6), method="proflik")
+```
+Now let's calculate the confidence intervals for return level estimates
+1. Normal approximation
+```{r}
+return.level(fit, return.period = 50, do.ci = T, method="normal")
+```
+2. Profile likelihood method <br />
+The profile likelihood plot should have the confidence interval within the range used and not merely be endpoints of the range specified.
+
+```{r}
+ci(fit, which.par = 3, return.period = 50, xrange = c(120, 250), method = 'proflik', verbose = T)
+```
+### Return levels for particular amount of rainfall
+```{r}
+# Precipitation amounts for which to find return levels
+precip.v <- seq(100, 200, 20)
+
+# Probability of exceeding
+prob.exceedance <- pextRemes(fit, q = precip.v, lower.tail = FALSE)
+prob.exceedance
+
+# Return period (in years)
+fit.rlevels <- 1/prob.exceedance
+names(fit.rlevels) <- paste(precip.v, "mm")
+fit.rlevels
+```
+
+### Likelihood ratio test
+Note that the 95 % confidence interval gives a range whose lower bound goes to negative. This means that $\xi$ could be 0.
+We know that when $\xi$ = 0, we have a gumbel distribution. To test this we perform a likelihood ratio test. <br />
+$H_o$ : The distribution is Gumbel. <br />
+$H_a$ : The distribution is Fretchet <br />
+Note: The model with the fewer parameters is always (mostly) the Null Hypothesis. 
+Because a model with 3 parameters (i.e. Fretchet ($\mu, \sigma, \xi$)) 
+is *more complex* than a model with 2 parameters (i.e. Gumbel ($\mu, \sigma$)), and in statistics we penalize complexity, hence $H_o$ is Gumbel and $H_a$ is Fretchet.
+
+1. Fit to a gumbel distribution
+```{r}
+fit.gumbel <- fevd(rf.p.ymax, type = "Gumbel", units = "mm/day")
+fit.gumbel
+```
+2. Likelihood ratio test <br />
+The p-value is high in our case (0.1121). This means at 90% confidence level (i.e. $\alpha = 0.1$), we can't reject $H_o$. <br />
+<span style="color: red"> Does this mean, we should use Gumbel to model the block maxima, as oppossed to the originally fitted model Fretchet? </span>
+```{r}
+lr.test(fit, fit.gumbel)
+```
+### Fit using L-moments approach (estimation of parameters)
+```{r}
+fitLM <- fevd(rf.p.ymax, method = "Lmoments")
+fitLM
+ci(fitLM)
+ci(fitLM, type = "parameter")
+```
+## 2. Peak over threshold approach
+The GP df is given by, <br />
+$H(x) = 1 - [1 + \xi(\dfrac{x-u}{\sigma_u})]^{-1/\xi}$ <br />
+This has the same interpreation as GEV df, <br />
+heavy tail when $\xi > 0$ (Pareto), <br />
+upper bound when $\xi < 0$ (Beta), and <br />
+exponential in the limit as $\xi \longrightarrow 0$, which results in <br/>
+$H(x) = 1 - e^{-(x-u)/\sigma}$ <br />
+Delhi : Daily precipitation time series 1901-2017
+```{r}
+# set any arbitrary threshold to visualize excesses
+set.thresh <- 50
+plot(rf.p, xlab = "day", ylab = "Precipitation (mm/day)"); abline(set.thresh, 0, col="red", lwd=3, lty=2)
+
+```
+### Threshrange plot
+Repeatedly fits the GP df to the data for a sequence of threshold choices. Confidence interval bands are shown as bars. <br />
+
+**Bias** : Too low a threshold, implies the asymptotic assumption becomes invalid however the amount of data samples is high thereby reducing the uncertainty (variance) in the estimate (short bars) . <br />
+
+**Variance** : Too high a threshold, implies the asymptotic assumption becomes valid  however the too less data samples mean a high uncertainty in the estimate (long bars). <br />
+
+**Reparameterized scale** : $\sigma^{*} = \sigma (u) - \xi u$, adjusted so that it is not a function of the threshold.
+
+The mean of the GP df is given by $E[X - u | X > u] = \sigma (u)/ (1- \xi) = (\sigma (u_{o}) + \xi u)/(1- \xi)$, which is a linear function of the threshold. <br />
+
+
+```{r}
+threshrange.plot(rf.p, r = c(20, 100), nint = 50)
+```
+### Mean excess
+The mean excess above a threshold is defined as <br />
+$e_X(u) = \sum_{i=1}^{n_u} (x_i - u)$ <br />
+where $x_i, ...., x_{n_{u}}$ are observations that exceed the threshold $u$. If the exceedances of a threshold u0 are generalized Pareto, the empirical mean residual life plot should be approximately linear for u > u0.
+
+
+```{r}
+mrlplot(rf.p)
+```
+<span style="color: red"> Does **50** (mm) look like an appropriate threshold?</span> <br />
+Let's check the number of data points above 50
+```{r}
+set.thresh <- 50
+print(paste("The number of data points above", set.thresh, "mm is", length(rf.p[rf.p > set.thresh])))
+print(paste(set.thresh, "mm  corresponds to", 
+            round(ecdf(rf.p)(set.thresh)*100, 2), 
+            "percentile of the data"))
+```
+### Make a dataframe
+This will make things easier later.
+```{r}
+library(lubridate)
+
+# Extract time vector
+t.v <- ncdf4.helpers::nc.get.time.series(nc.station)
+
+# Make the df
+rf.p.df <- data.frame(obs = 1:length(rf.p), tobs = yday(t.v), 
+                      month = month(t.v), day = day(t.v), year = year(t.v),
+                      Prec = rf.p)
+
+# Print the df
+print(as.matrix(rf.p.df), quote = FALSE, max = 100)
+```
+
+### Fit the excesses 1
+```{r}
+# By default the time units for the event are 365.25/year 
+# Since we have daily data, we don't need to specify them explicitly.
+fit.pot1 <- fevd(Prec, rf.p.df, threshold = 50, type = "GP", units = "mm")
+fit.pot1
+plot(fit.pot1)
+```
+We can calculate the return levels for the POT fit.
+```{r}
+return.level(fit.pot1, rperiods)
+```
+Calculating return levels for a *GPD* fit is a little bit different. 
+We know the excess (peaks) above a threshold $u$, follow a *GPD* distribution. <br />
+**Final Goal** : We need to find the probability of exceeding a certain precipitation amount *x* which exceeds every *m* years. <br />
+$prob(X \le x \hspace{0.1cm}|\hspace{0.1cm} X > u) = GPD(x-u\hspace{0.1cm}| \hspace{0.1cm} \sigma, \xi)$ <br />
+$prob(X > x \hspace{0.1cm}|\hspace{0.1cm} X > u) = 1 - GPD(x-u\hspace{0.1cm}| \hspace{0.1cm} \sigma, \xi)$
+
+We know, $P(X > x\hspace{0.1cm}| \hspace{0.1cm} X > u) = \dfrac{P(X> x,X> u)}{P(X > u)}$ <br />
+But, $P(X >x, X>u) = P(X>x)$, $\implies P(X > x\hspace{0.1cm}| \hspace{0.1cm} X > u) = \dfrac{P(X> x)}{P(X > u)}$ <br />
+Simplyfying we get, $P(X > x\hspace{0.1cm}) = P(X > u)\cdot P(X> x \hspace{0.1cm} | \hspace{0.1cm}X> u)$ <br />
+$\implies P(X > x) = P(X > u)\cdot (1 - GPD(x-u\hspace{0.1cm}| \hspace{0.1cm} \sigma, \xi))$ <br />
+We can find $P(X >u)$ empirically (withput fitting the data) by calculating the number of data points above $u$. <br />
+Since, in our case, the frequency of data points is daily, we have the probability of exceeding the precipitation amount *x*
+on any day of the year, $P(X > x) = P(X > u)\cdot (1 - GPD(x-u\hspace{0.1cm}| \hspace{0.1cm} \sigma, \xi))$ <br />
+For an *m*-year return period, $P(X > x) = \dfrac{1}{m} \cdot \dfrac{1}{365.25}$, <br />
+$\implies \dfrac{1}{m} \cdot \dfrac{1}{365.25} = P(X > u)\cdot (1 - GPD(x-u\hspace{0.1cm}| \hspace{0.1cm} \sigma, \xi)$ <br />
+$\implies GPD(x-u\hspace{0.1cm}| \hspace{0.1cm} \sigma, \xi) = 1-(\dfrac{1}{m} \cdot \dfrac{1}{365} \cdot \dfrac {1}{P(X > u)})$ <br />
+
+i.e. we need to find the $1-(\dfrac{1}{m} \cdot \dfrac{1}{365.25} \cdot \dfrac {1}{P(X > u)})$ 
+quantile from the *GPD* CDF.<br />
+
+
+```{r}
+#Empirical probability P(X>u) from data
+u <- 50
+p.gtu <- length(rf.p[rf.p > u])/ length(rf.p)
+
+# Make Fit object easier to manage 
+fit.distilled <- distill(fit.pot1)
+
+for (param in c("scale", "shape")){
+  assign(param, fit.distilled[param])
+}
+
+# get [1 - (1/m * 1/365 * P(X > u))] quantile from the cdf
+## Calculate 2, 5, 10, 20, 50, 100 year return levels
+rperiods <- c(2, 5, 10, 20, 50, 100)
+rlevs <- c()
+for (m in rperiods){
+  
+   rlevs<- c(rlevs, qevd(1 - ((1/m)*(1/365.25)*(1/p.gtu)), scale = scale, shape = shape, threshold = 50, type = "GP"))
+}
+names(rlevs) <- paste0(rperiods, "-year level")
+print(rlevs)
+```
+Which is the same as calculated by the package
+```{r}
+rlevs <- as.vector(return.level(fit.pot1, return.period = rperiods))
+names(rlevs) <- paste0(rperiods, "-year level")
+print(rlevs)
+```
+
+
+
+
+
+### Fit the excesses 2
+Seasonality => Non-stationarity of the data. <br />
+Taking into account seasonality while estimating the scale parameter. A common way to model seasonality is to assume sines and cosines with period = 1 year. So for every *day of the year*  we have a different scale parameter. <br  />
+
+$\sigma (t) = exp(\phi_{o} + \phi_{1}cos(2\pi\cdot t/365.25) + \phi_{2}sin(2\pi\cdot t/365.25)),\hspace{0.2cm} t = 1,2,....,365$
+
+```{r}
+
+fit.pot2 <- fevd(Prec, rf.p.df, threshold = 50,
+                 scale.fun = ~ cos(2 * pi * tobs / 365.25) + sin(2 * pi * tobs/ 365.25),
+                 type = "GP", use.phi = TRUE, units = "mm")
+fit.pot2
+plot(fit.pot2)
+```
+In the above plot we notice (hard to see) that there is a different return level for each day of the year. It plots return levels for different return period (1, 2, 5, 10, 20, 50...in years) for the whole time series. It is basically a repeating curve with the same return level corresponding to each day of the year. <br />
+
+Let's get return levels for 10, 20 and 50 year period.
+
+```{r}
+rlevels <- as.data.frame(unclass(return.level(fit.pot2, c(10, 20, 50))))
+rlevels["tobs"] = rf.p.df["tobs"]
+rlevels["year"] = rf.p.df["year"]
+
+print(as.matrix(rlevels), quote = FALSE, max = 100)
+```
+So this has 42734 rows (equivalent to number of observations). <br />
+Let's make it into a *tidy-form* data
+```{r}
+library(reshape2)
+rlevels.melt <- melt(rlevels, id.vars = c("tobs", "year"))
+print(as.matrix(rlevels.melt), quote = FALSE, max = 100)
+```
+
+Now let's plot the return levels for any year, for each day of the year. <br />
+**NOTE**: The following plot will be the same for every year. This is because our non stationarity assumption for the scale parameter is considering seasonality, and not a yearly trend in precipitation.
+```{r}
+library(ggplot2)
+ggplot(subset(rlevels.melt, year == 2000), aes(tobs, value)) +
+geom_line(aes(colour = variable)) +
+xlab("Day of the year") +
+ylab("Return level (mm)") +
+labs(colour="Return period")
+```
+
+### Likelihood ratio test
+In the same way we performed likelihood ratio test with the *more complex* Fretchet ($\mu, \sigma, \xi$) v/s the Null hypotheses i.e. the *less complex* Gumbel ($\mu, \sigma$). Here we have, <br />
+$H_{o}$ : The scale parameter is stationary i.e. no seasonality<br />
+$H_{a}$ : The scale parameter is non-stationary i.e. taking into account seasonality. <br />
+
+
+```{r}
+lr.test(fit.pot1, fit.pot2)
+```
+We get a **p-value = 0.01813**. This means there is sufficient evidence to reject the null hypotheses in favour of the alternate. In other words, we will use the dsitribution with seasonally varying scale parameter to model our data. <br />
+
+We can derive confidence intervals for the parameters using normal approx.
+```{r}
+ci(fit.pot2, type="parameter")
+```
+However, more appropriate way of finding the confidence intervals would be to look at the trace plot and find (by hit and trial) the appropriate ranges to look for when using the profile likelihood method.
+```{r}
+plot(fit.pot2, "trace")
+```
+Again, I don't exactly know how to choose a good range.
+```{r}
+ci(fit.pot2, type="parameter", which.par = 4, method="proflik", xrange = c(-0.5, 0.3))
+```
+
